@@ -21,7 +21,7 @@
 -behaviour(gen_event).
 
 -export([init/1, handle_call/2, handle_event/2, handle_info/2, terminate/2,
-        code_change/3]).
+         code_change/3]).
 
 -export([config_to_id/1]).
 
@@ -30,14 +30,14 @@
 -include_lib("lager/include/lager.hrl").
 
 -define(DEFAULT_FORMAT,["[", severity, "] ",
-        {pid, ""},
-        {module, [
-                {pid, ["@"], ""},
-                module,
-                {function, [":", function], ""},
-                {line, [":",line], ""}], ""},
-        " ", message]).
-
+                        {pid, ""},
+                        {module, [
+                                  {pid, ["@"], ""},
+                                  module,
+                                  {function, [":", function], ""},
+                                  {line, [":",line], ""}], ""},
+                        " ", message
+                       ]).
 
 %% @private
 init([Ident, Facility, Level]) ->
@@ -59,14 +59,15 @@ init2([Ident, Facility, Level, {Formatter, FormatterConfig}]) ->
             try parse_level(Level) of
                 Lvl ->
                     {ok, #state{level=Lvl,
-                            id=config_to_id([Ident, Facility, Level]),
-                            handle=Log,
-                            formatter=Formatter,
-                            format_config=FormatterConfig}}
-                catch
-                    _:_ ->
-                        {error, bad_log_level}
-                end;
+                                id=config_to_id([Ident, Facility, Level]),
+                                handle=Log,
+                                formatter=Formatter,
+                                format_config=FormatterConfig
+                               }}
+            catch
+                _:_ ->
+                    {error, bad_log_level}
+            end;
         Error ->
             Error
     end.
@@ -88,13 +89,19 @@ handle_call(_Request, State) ->
 
 %% @private
 handle_event({log, Level, {_Date, _Time}, [_LevelStr, Location, Message]},
-        #state{level=LogLevel} = State) when Level =< LogLevel ->
-    syslog:log(State#state.handle, convert_level(Level), [Location, Message]),
+             #state{level=LogLevel, handle=Handle} = State) when Level =< LogLevel ->
+    safe_log(Handle, convert_level(Level), [Location, Message]),
     {ok, State};
-handle_event({log, Message}, #state{level=Level,formatter=Formatter,format_config=FormatConfig} = State) ->
+handle_event({log, Message}
+            ,#state{level=Level
+                   ,formatter=Formatter
+                   ,format_config=FormatConfig
+                   ,handle=Handle
+                   } = State
+            ) ->
     case lager_util:is_loggable(Message, Level, State#state.id) of
         true ->
-            syslog:log(State#state.handle, convert_level(lager_msg:severity_as_int(Message)), [Formatter:format(Message, FormatConfig)]),
+            safe_log(Handle, convert_level(lager_msg:severity_as_int(Message)), [Formatter:format(Message, FormatConfig)]),
             {ok, State};
         false ->
             {ok, State}
@@ -102,7 +109,17 @@ handle_event({log, Message}, #state{level=Level,formatter=Formatter,format_confi
 handle_event(_Event, State) ->
     {ok, State}.
 
+safe_log(Handle, Priority, Message) ->
+    try syslog:log(Handle, Priority, Message)
+    catch
+        _E:_R:_ST -> 'ok'
+    end.
+
 %% @private
+handle_info({'EXIT', Handle, _Reason}
+           ,#state{handle=Handle}=State
+           ) ->
+    restart_logging(State);
 handle_info(_Info, State) ->
     {ok, State}.
 
@@ -139,3 +156,15 @@ parse_level(Level) ->
             lager_util:level_to_num(Level)
     end.
 
+restart_logging(#state{level=Lvl
+                      ,id={?MODULE, {Ident, Facility}}
+                      }=State
+               ) ->
+    case syslog:open(Ident, [pid], Facility) of
+        {error, _E}=Error -> Error;
+        {ok, Log} ->
+            {ok, State#state{level=Lvl,
+                             handle=Log
+                            }
+            }
+    end.
